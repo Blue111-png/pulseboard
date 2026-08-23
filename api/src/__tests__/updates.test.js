@@ -781,7 +781,7 @@ describe("POST /api/updates/:id/reactions", () => {
       expect(res.status).toBe(201);
     }
 
-    const res = await makeRequest(61);
+    const res = await makeRequest(60);
     expect(res.status).toBe(429);
     expect(res.body.error).toBe(
       "Too many reactions clicked. Please wait a minute before reacting again.",
