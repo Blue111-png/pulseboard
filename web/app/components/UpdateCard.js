@@ -6,6 +6,7 @@ import {
   deleteUpdate,
   editUpdate,
   removeReaction,
+  togglePin,
 } from "@/lib/api";
 
 const REACTION_OPTIONS = ["👍", "🎉", "❤️", "🚀"];
@@ -25,6 +26,28 @@ const STATUS_ICONS = {
 const MS_PER_MINUTE = 60 * 1000;
 const MS_PER_HOUR = 60 * MS_PER_MINUTE;
 const MS_PER_DAY = 24 * MS_PER_HOUR;
+
+function createOptimisticUpdate(update, emoji, userId, isAdding) {
+  const reactions = [...(update.reactions || [])];  
+  if (isAdding) {    
+    reactions.push({
+      emoji,
+      user: { _id: userId },
+      _id: `temp-${Date.now()}`,
+      createdAt: new Date().toISOString()
+    });
+  } else {
+    
+    const index = reactions.findIndex(
+      r => r.emoji === emoji && r.user?._id === userId
+    );
+    if (index !== -1) {
+      reactions.splice(index, 1);
+    }
+  }
+  
+  return { ...update, reactions };
+}
 
 export function formatRelativeTime(createdAt, now = Date.now()) {
   const createdDate = new Date(createdAt);
@@ -104,6 +127,8 @@ export default function UpdateCard({ update, auth, onUpdated, onDeleted }) {
   const [editText, setEditText] = useState(update.text);
   const [editStatus, setEditStatus] = useState(update.status);
   const [saving, setSaving] = useState(false);
+  const [isCopied, setIsCopied] = useState(false);
+  const [pendingReactions, setPendingReactions] = useState({}); 
   const reactionGroups = groupReactions(update.reactions || []);
 
   const visibleReactions = [
@@ -115,29 +140,69 @@ export default function UpdateCard({ update, auth, onUpdated, onDeleted }) {
     setEditStatus(update.status);
   }, [update._id, update.text, update.status]);
 
-  async function handleReactionToggle(emoji) {
+
+async function handleReactionToggle(emoji) {
+  if (!auth) return;
+  setError(null);
+
+  const userId = auth.user?._id;
+  const myReaction = findUserReaction(
+    update.reactions || [],
+    userId,
+    emoji,
+  );
+
+  const previousUpdate = update;
+  const isAdding = !myReaction;
+  
+  const optimisticUpdate = createOptimisticUpdate(
+    previousUpdate,
+    emoji,
+    userId,
+    isAdding
+  );
+  onUpdated(optimisticUpdate);
+
+  
+  setPendingReactions(prev => ({ ...prev, [emoji]: isAdding ? 'adding' : 'removing' }));
+
+  try {
+    let updated;
+    if (isAdding) {
+      ({ update: updated } = await addReaction(
+        { updateId: update._id, emoji },
+        auth.token,
+      ));
+    } else {
+      ({ update: updated } = await removeReaction(
+        { updateId: update._id, reactionId: myReaction._id },
+        auth.token,
+      ));
+    }
+
+    setPendingReactions(prev => ({ ...prev, [emoji]: undefined }));
+    onUpdated(updated);
+  } catch (err) {
+    setPendingReactions(prev => ({ ...prev, [emoji]: undefined }));
+    onUpdated(previousUpdate);
+    setError(err.message);
+  }
+}
+
+
+  async function handleTogglePin() {
     if (!auth) return;
+
     setError(null);
 
-    const myReaction = findUserReaction(
-      update.reactions || [],
-      auth.user?._id,
-      emoji,
-    );
-
     try {
-      let updated;
+      const { update: updated } = await togglePin(
+        { updateId: update._id, pinned: !update.pinned },
+        auth.token,
+      );
 
-      if (myReaction) {
-        ({ update: updated } = await removeReaction(
-          { updateId: update._id, reactionId: myReaction._id },
-          auth.token,
-        ));
-      } else {
-        ({ update: updated } = await addReaction(
-          { updateId: update._id, emoji },
-          auth.token,
-        ));
+      if (!updated) {
+        setError("Failed to pin the update. Please try again.");
       }
 
       onUpdated(updated);
@@ -196,20 +261,32 @@ export default function UpdateCard({ update, auth, onUpdated, onDeleted }) {
       setSaving(false);
     }
   }
+  async function handleCopyButton() {
+    const URL = process.env.NEXT_PUBLIC_URL || "http://localhost:3000";
+    navigator.clipboard.writeText(URL + "/updates/" + update._id).then(
+      () => {
+        setIsCopied(true);
+      },
+      () => {
+        alert("Something went wrong when copying to clipboard!");
+      },
+    );
+    setTimeout(() => setIsCopied(false), 5000);
+  }
 
   function getAuthorInitials(update) {
     const authorName = update.author?.displayName;
 
     if (!authorName) {
-      return "U" // U is for Unknown
+      return "U"; // U is for Unknown
     }
 
     const initials = authorName
-    .split(" ")
-    .map(word => word.slice(0, 1))
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
+      .split(" ")
+      .map((word) => word.slice(0, 1))
+      .join("")
+      .slice(0, 2)
+      .toUpperCase();
 
     return initials;
   }
@@ -247,9 +324,7 @@ export default function UpdateCard({ update, auth, onUpdated, onDeleted }) {
               )}
             </div>
           </div>
-          <div className="initials-badge">
-            {getAuthorInitials(update)}
-          </div>
+          <div className="initials-badge">{getAuthorInitials(update)}</div>
         </div>
         {isEditing ? (
           <div className="edit-field">
@@ -298,17 +373,37 @@ export default function UpdateCard({ update, auth, onUpdated, onDeleted }) {
               <button
                 key={emoji}
                 type="button"
-                className={`reaction-button ${myReaction ? "active" : ""}`}
+                className={`reaction-button ${myReaction ? "active" : ""} ${pendingReactions[emoji] ? "pending" : ""}`} 
                 aria-pressed={Boolean(myReaction)}
-                disabled={!auth}
+                disabled={!auth || !!pendingReactions[emoji]}
                 onClick={() => handleReactionToggle(emoji)}
               >
                 <span className="reaction-emoji">{emoji}</span>
                 <span className="reaction-count">{count}</span>
+                {pendingReactions[emoji] && <span className="reaction-spinner">⟳</span>}
               </button>
             );
           })}
         </div>
+        {isCopied ? (
+          <button
+            type="button"
+            title="Copy this update's link"
+            className="copied-link-button"
+            onClick={() => handleCopyButton()}
+          >
+            Link Copied
+          </button>
+        ) : (
+          <button
+            type="button"
+            title="Copy this update's link"
+            className="copy-link-button"
+            onClick={() => handleCopyButton()}
+          >
+            Copy Link
+          </button>
+        )}
         {isEditing ? (
           <div className="edit-actions">
             <button
@@ -338,7 +433,8 @@ export default function UpdateCard({ update, auth, onUpdated, onDeleted }) {
                 Edit
               </button>
             )}
-              {(auth?.user?.role === "LEAD" || auth?.user?._id === update.author?._id) && (
+            {(auth?.user?.role === "LEAD" ||
+              auth?.user?._id === update.author?._id) && (
               <button
                 className="delete-btn"
                 type="button"
@@ -348,6 +444,16 @@ export default function UpdateCard({ update, auth, onUpdated, onDeleted }) {
               </button>
             )}
           </>
+        )}
+        {(auth?.user?.role === "LEAD" || update.pinned) && (
+          <button
+            className={`pin-btn ${update.pinned ? "is-pinned" : ""}`}
+            type="button"
+            onClick={handleTogglePin}
+            disabled={auth?.user?.role !== "LEAD"}
+          >
+            {update.pinned ? "Pinned" : "Pin"}
+          </button>
         )}
       </footer>
       {error && <p className="error">{error}</p>}

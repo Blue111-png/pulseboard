@@ -7,8 +7,8 @@ jest.mock("@/lib/api", () => ({
 }));
 
 jest.mock("../UpdateCard", () => {
-  return function MockUpdateCard() {
-    return <div>Mock Update Card</div>;
+  return function MockUpdateCard({ update }) {
+    return <div>{update.text}</div>;
   };
 });
 
@@ -218,6 +218,209 @@ describe("Feed - handleShowMyUpdates", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByRole("option", { name: "Priya Sharma" }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("Feed - manual refresh", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("refreshes the feed using the currently selected filters and sort", async () => {
+    const existingUpdates = [
+      {
+        _id: "update-1",
+        text: "Existing update",
+        status: "done",
+        author: {
+          _id: "u1",
+          displayName: "Diego Fernandez",
+        },
+      },
+    ];
+
+    listUpdates.mockImplementation(({ status } = {}) => {
+      if (status === "blocked") {
+        return Promise.resolve({
+          updates: [],
+          pagination: {
+            hasNextPage: false,
+          },
+        });
+      }
+
+      return Promise.resolve({
+        updates: existingUpdates,
+        pagination: {
+          hasNextPage: false,
+        },
+      });
+    });
+
+    render(<Feed auth={null} refreshToken={0} />);
+
+    await screen.findByText("Existing update");
+
+    const statusSelect = screen.getAllByRole("combobox")[0];
+
+    fireEvent.change(statusSelect, {
+      target: { value: "blocked" },
+    });
+
+    const sortSelect = screen.getAllByRole("combobox")[3];
+
+    fireEvent.change(sortSelect, {
+      target: { value: "oldest" },
+    });
+
+    await waitFor(() => {
+      expect(listUpdates).toHaveBeenLastCalledWith({
+        status: "blocked",
+        author: undefined,
+        sort: "oldest",
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      expect(listUpdates).toHaveBeenLastCalledWith({
+        status: "blocked",
+        author: undefined,
+        sort: "oldest",
+      });
+    });
+
+    expect(statusSelect).toHaveValue("blocked");
+    expect(sortSelect).toHaveValue("oldest");
+  });
+
+  it("keeps existing updates visible while refreshing", async () => {
+    let resolveRefresh;
+    let callCount = 0;
+
+    listUpdates.mockImplementation(() => {
+      callCount += 1;
+
+      if (callCount <= 2) {
+        return Promise.resolve({
+          updates: [
+            {
+              _id: "update-1",
+              text: "Existing update",
+            },
+          ],
+          pagination: {
+            hasNextPage: false,
+          },
+        });
+      }
+
+      return new Promise((resolve) => {
+        resolveRefresh = resolve;
+      });
+    });
+
+    render(<Feed auth={null} refreshToken={0} />);
+
+    expect(await screen.findByText("Existing update")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(
+      screen.getByRole("button", { name: "Refreshing..." }),
+    ).toBeDisabled();
+
+    expect(screen.getByText("Existing update")).toBeInTheDocument();
+
+    resolveRefresh({
+      updates: [
+        {
+          _id: "update-2",
+          text: "Refreshed update",
+        },
+      ],
+      pagination: {
+        hasNextPage: false,
+      },
+    });
+
+    expect(await screen.findByText("Refreshed update")).toBeInTheDocument();
+
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled();
+  });
+});
+
+describe("Feed - empty state", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("shows a no-updates message when there are no updates", async () => {
+    listUpdates.mockResolvedValue({
+      updates: [],
+      pagination: {
+        hasNextPage: false,
+      },
+    });
+
+    render(<Feed auth={null} refreshToken={0} />);
+
+    expect(await screen.findByText("No updates yet.")).toBeInTheDocument();
+
+    expect(
+      screen.queryByRole("button", { name: "Clear filters" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the active filter when it produces no results", async () => {
+    const existingUpdates = [
+      {
+        _id: "update-1",
+        status: "done",
+        author: {
+          _id: "u1",
+          displayName: "Diego Fernandez",
+        },
+        tags: ["frontend"],
+      },
+    ];
+
+    listUpdates.mockImplementation(({ status } = {}) => {
+      if (status === "blocked") {
+        return Promise.resolve({
+          updates: [],
+          pagination: {
+            hasNextPage: false,
+          },
+        });
+      }
+
+      return Promise.resolve({
+        updates: existingUpdates,
+        pagination: {
+          hasNextPage: false,
+        },
+      });
+    });
+
+    render(<Feed auth={null} refreshToken={0} />);
+
+    const statusSelect = screen.getAllByRole("combobox")[0];
+
+    fireEvent.change(statusSelect, {
+      target: { value: "blocked" },
+    });
+
+    expect(
+      await screen.findByText("No updates match your filters."),
+    ).toBeInTheDocument();
+
+    expect(screen.getByText("Status: blocked")).toBeInTheDocument();
+
+    expect(
+      screen.getByRole("button", { name: "Clear filters" }),
     ).toBeInTheDocument();
   });
 });

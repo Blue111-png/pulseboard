@@ -45,14 +45,44 @@ export function login({ email, password }) {
   });
 }
 
-export function listUpdates({ author, status, tag, sort } = {}) {
+export function forgotPassword({ email }) {
+  return request("/api/auth/forgot-password", {
+    method: "POST",
+    body: { email },
+  });
+}
+
+export function resetPassword({ token, newPassword }) {
+  return request("/api/auth/reset-password", {
+    method: "POST",
+    body: { token, newPassword },
+  });
+}
+
+export function listUpdates({
+  author,
+  status,
+  tag,
+  sort,
+  page = 1,
+  limit = 10,
+} = {}) {
   const params = new URLSearchParams();
+
   if (author) params.set("author", author);
   if (status) params.set("status", status);
   if (tag) params.set("tag", tag);
   if (sort) params.set("sort", sort);
+  if (page) params.set("page", page);
+  if (limit) params.set("limit", limit);
+
   const query = params.toString() ? `?${params.toString()}` : "";
+
   return request(`/api/updates${query}`);
+}
+
+export function getUpdateById(id, token) {
+  return request(`/api/updates/${id}`, { token });
 }
 
 export function createUpdate({ text, status, tags }, token) {
@@ -89,6 +119,14 @@ export function addReaction({ updateId, emoji }, token) {
 export function removeReaction({ updateId, reactionId }, token) {
   return request(`/api/updates/${updateId}/reactions/${reactionId}`, {
     method: "DELETE",
+    token,
+  });
+}
+
+export function togglePin({ updateId, pinned }, token) {
+  return request(`/api/updates/${updateId}/pin`, {
+    method: "PATCH",
+    body: { pinned },
     token,
   });
 }

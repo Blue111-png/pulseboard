@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const Update = require("../models/Update");
 const { STATUS_VALUES, VISIBILITY_VALUES } = require("../models/Update");
 const rateLimit = require("express-rate-limit");
@@ -6,6 +7,8 @@ const { requireAuth, optionalAuth, checkRole } = require("../middleware/auth");
 const SORT_VALUES = ["newest", "oldest", "most-reactions"];
 
 const router = express.Router();
+
+const isValidObjectId = (id) => mongoose.isObjectIdOrHexString(id);
 
 const createUpdateLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -42,6 +45,12 @@ function isVisibleToRequester(update, user) {
 router.get("/", optionalAuth, async (req, res) => {
   try {
     const { author, status, tag, sort, q } = req.query;
+
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit, 10) || 10, 1),
+      50,
+    );
     const filter = {};
 
     // Non-LEAD requesters (members and anonymous) never see leads-only updates.
@@ -67,6 +76,12 @@ router.get("/", optionalAuth, async (req, res) => {
       filter.tags = tag;
     }
 
+    if (q && q.trim()) {
+      filter.text = {
+        $regex: q.trim(),
+        $options: "i",
+      };
+    }
     if (sort) {
       if (!SORT_VALUES.includes(sort)) {
         return res.status(400).json({
@@ -76,25 +91,50 @@ router.get("/", optionalAuth, async (req, res) => {
     }
 
     const sortDirection = sort === "oldest" ? 1 : -1;
-    const updates = await Update.find(filter)
-      .sort({ createdAt: sortDirection })
-      .populate("author", "displayName email")
-      .populate("reactions.user", "displayName email");
 
-    let filterUpdates = updates;
-
-    if (q) {
-      const searchString = q.trim().toLowerCase();
-      filterUpdates = updates.filter((update) => {
-        return update.text.toLowerCase().includes(searchString);
-      });
-    }
+    let updates;
 
     if (sort === "most-reactions") {
-      filterUpdates.sort((a, b) => b.reactions.length - a.reactions.length);
-    }
+      updates = await Update.aggregate([
+        { $match: filter },
+        {
+          $addFields: {
+            reactionCount: { $size: "$reactions" },
+          },
+        },
+        {
+          $sort: {
+            pinned: -1,
+            reactionCount: -1,
+            createdAt: -1,
+          },
+        },
+        { $skip: (page - 1) * limit },
+        { $limit: limit },
+      ]);
 
-    return res.json({ updates: filterUpdates });
+      await Update.populate(updates, [
+        { path: "author", select: "displayName" },
+        { path: "reactions.user", select: "displayName" },
+      ]);
+    } else {
+      updates = await Update.find(filter)
+        .sort({ pinned: -1, createdAt: sortDirection })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .populate("author", "displayName")
+        .populate("reactions.user", "displayName");
+    }
+    const total = await Update.countDocuments(filter);
+    const hasNextPage = page * limit < total;
+    return res.json({
+      updates,
+      pagination: {
+        page,
+        limit,
+        hasNextPage,
+      },
+    });
   } catch (err) {
     return res.status(500).json({ error: "Failed to fetch updates" });
   }
@@ -153,7 +193,6 @@ router.get("/leaderboard", async (req, res) => {
           author: {
             _id: "$author._id",
             displayName: "$author.displayName",
-            email: "$author.email",
           },
           updateCount: 1,
           reactionCount: 1,
@@ -208,7 +247,7 @@ router.get("/export", async (req, res) => {
         $gte: startDate,
         $lte: endDate,
       },
-    }).populate("author", "displayName email");
+    }).populate("author", "displayName");
 
     // Format the data for export
     const exportData = updates.map((update) => ({
@@ -277,10 +316,14 @@ function exportAsCSV(res, data) {
 
 // GET /api/updates/:id
 router.get("/:id", optionalAuth, async (req, res) => {
+  if (!isValidObjectId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid update id" });
+  }
+
   try {
     const update = await Update.findById(req.params.id)
-      .populate("author", "displayName email")
-      .populate("reactions.user", "displayName email");
+      .populate("author", "displayName")
+      .populate("reactions.user", "displayName");
 
     if (!update) {
       return res.status(404).json({ error: "Update not found" });
@@ -298,6 +341,10 @@ router.get("/:id", optionalAuth, async (req, res) => {
 });
 
 router.patch("/:id", requireAuth, async (req, res) => {
+  if (!isValidObjectId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid update id" });
+  }
+
   try {
     const { text, status } = req.body;
 
@@ -350,11 +397,35 @@ router.patch("/:id", requireAuth, async (req, res) => {
     await update.save();
 
     const populated = await update.populate([
-      { path: "author", select: "displayName email" },
-      { path: "reactions.user", select: "displayName email" },
+      { path: "author", select: "displayName" },
+      { path: "reactions.user", select: "displayName" },
     ]);
 
+
     return res.json({ update: populated });
+  } catch (err) {
+    return res.status(400).json({ error: "Invalid update id" });
+  }
+});
+
+router.patch("/:id/pin", requireAuth, checkRole("LEAD"), async (req, res) => {
+  if (!isValidObjectId(req.params.id)) {
+    return res.status(400).json({ error: "Invalid update id" });
+  }
+
+  try {
+    const { pinned } = req.body;
+    const update = await Update.findById(req.params.id);
+
+    if (!update) return res.status(404).json({ error: "Update not found" });
+
+    update.pinned = pinned;
+    await update.save();
+
+    const populated = await update.populate("author", "displayName");
+
+
+    return res.status(200).json({ update: populated });
   } catch (err) {
     return res.status(400).json({ error: "Invalid update id" });
   }
@@ -365,6 +436,10 @@ router.delete(
   requireAuth,
   checkRole("LEAD", "MEMBER"),
   async (req, res) => {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid update id" });
+    }
+
     try {
       const update = await Update.findById(req.params.id);
 
@@ -429,6 +504,25 @@ router.post(
           return [];
         }
 
+        const maxTags = 10;
+        const maxTagLength = 30;
+
+        if (tags.length > maxTags) {
+          return {
+            error: `Maximum ${maxTags} tags are allowed.`,
+          };
+        }
+
+        if (
+          tags.some(
+            (tag) => typeof tag !== "string" || tag.length > maxTagLength,
+          )
+        ) {
+          return {
+            error: `Maximum ${maxTagLength} characters are allowed for a tag.`,
+          };
+        }
+
         return [
           ...new Set(
             tags
@@ -438,17 +532,23 @@ router.post(
         ];
       }
 
+      const validatedTags = normalizeTags(tags);
+
+      if (validatedTags?.error) {
+        return res.status(400).json({ error: validatedTags.error });
+      }
+
       const update = await Update.create({
         author: req.user.id,
         text: text.trim(),
         status,
         visibility: visibility || "team",
-        tags: normalizeTags(tags),
+        tags: validatedTags,
       });
 
       const populated = await update.populate([
-        { path: "author", select: "displayName email" },
-        { path: "reactions.user", select: "displayName email" },
+        { path: "author", select: "displayName" },
+        { path: "reactions.user", select: "displayName" },
       ]);
 
       //* Broadcast event of post being made
@@ -469,6 +569,10 @@ router.post(
   reactionLimiter,
   checkRole("LEAD", "MEMBER"),
   async (req, res) => {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid update id" });
+    }
+
     try {
       const { emoji } = req.body;
 
@@ -501,8 +605,8 @@ router.post(
       await update.save();
 
       const populated = await update.populate([
-        { path: "author", select: "displayName email" },
-        { path: "reactions.user", select: "displayName email" },
+        { path: "author", select: "displayName" },
+        { path: "reactions.user", select: "displayName" },
       ]);
 
       const io = req.app.get("io");
@@ -522,6 +626,13 @@ router.delete(
   reactionLimiter,
   checkRole("LEAD", "MEMBER"),
   async (req, res) => {
+    if (
+      !isValidObjectId(req.params.id) ||
+      !isValidObjectId(req.params.reactionId)
+    ) {
+      return res.status(400).json({ error: "Invalid update or reaction id" });
+    }
+
     try {
       const update = await Update.findById(req.params.id);
       if (!update || !isVisibleToRequester(update, req.user)) {
@@ -543,8 +654,8 @@ router.delete(
       await update.save();
 
       const populated = await update.populate([
-        { path: "author", select: "displayName email" },
-        { path: "reactions.user", select: "displayName email" },
+        { path: "author", select: "displayName" },
+        { path: "reactions.user", select: "displayName" },
       ]);
 
       return res.json({ update: populated });
