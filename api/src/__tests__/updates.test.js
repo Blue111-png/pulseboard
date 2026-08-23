@@ -57,6 +57,7 @@ describe("POST /api/updates", () => {
     expect(res.body.update.text).toBe("Shipped the login page");
     expect(res.body.update.status).toBe("done");
     expect(res.body.update.author._id).toBe(userId);
+    expect(res.body.update).not.toHaveProperty("email");
   });
 
   it("rejects unauthenticated requests", async () => {
@@ -129,6 +130,7 @@ describe("POST /api/updates", () => {
     expect(res.body.update.status).toBe("done");
     expect(res.body.update.tags).toStrictEqual(["frontend", "ui"]);
     expect(res.body.update.author._id).toBe(userId);
+    expect(res.body.update).not.toHaveProperty("email");
   });
 
   it("creates an update without tags", async () => {
@@ -142,6 +144,47 @@ describe("POST /api/updates", () => {
     expect(res.body.update.status).toBe("done");
     expect(res.body.update.tags).toStrictEqual([]);
     expect(res.body.update.author._id).toBe(userId);
+    expect(res.body.update).not.toHaveProperty("email");
+  });
+
+  it("sends 400 error when tags for an update exceed maximum limit", async () => {
+    const res = await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        text: "Shipped the login page",
+        status: "done",
+        tags: [
+          "frontend",
+          "ui",
+          "backend",
+          "api",
+          "design",
+          "test",
+          "react",
+          "node",
+          "ci cd",
+          "docker",
+          "documentation",
+        ],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(`Maximum 10 tags are allowed.`);
+  });
+
+  it("sends 400 error when a tag exceeds maximum allowed character length limit", async () => {
+    const res = await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        text: "Shipped the login page",
+        status: "done",
+        tags: ["frontend", "ui", "production ready microservice architecture"],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(`Maximum 30 characters are allowed for a tag.`);
   });
 });
 
@@ -162,6 +205,9 @@ describe("GET /api/updates", () => {
     expect(res.status).toBe(200);
     expect(res.body.updates).toHaveLength(2);
     expect(res.body.updates[0].text).toBe("Second update");
+    res.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
   });
 
   it("lists updates oldest first", async () => {
@@ -180,33 +226,137 @@ describe("GET /api/updates", () => {
     expect(res.status).toBe(200);
     expect(res.body.updates).toHaveLength(2);
     expect(res.body.updates[0].text).toBe("First update");
+    res.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
   });
 
-  it("lists updates with the most reactions first", async () => {
-    const createRes = await request(app)
+  it("sorts by reactions before applying pagination", async () => {
+    const first = await request(app)
       .post("/api/updates")
       .set("Authorization", `Bearer ${token}`)
       .send({ text: "Most reacted", status: "blocked" });
 
-    const updateId = createRes.body.update._id;
+    const second = await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "Second most reacted", status: "blocked" });
+
+    const third = await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "No reactions", status: "blocked" });
+
+    const firstId = first.body.update._id;
+    const secondId = second.body.update._id;
+
+    // First update gets 2 reactions
+    await request(app)
+      .post(`/api/updates/${firstId}/reactions`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ emoji: "✅" });
+
+    await request(app)
+      .post(`/api/updates/${firstId}/reactions`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ emoji: "🔥" });
+
+    // Second update gets 1 reaction
+    await request(app)
+      .post(`/api/updates/${secondId}/reactions`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ emoji: "👍" });
+
+    // Page 1 should contain the most-reacted update
+    const page1 = await request(app).get(
+      "/api/updates?sort=most-reactions&page=1&limit=1",
+    );
+
+    expect(page1.status).toBe(200);
+    expect(page1.body.updates).toHaveLength(1);
+    expect(page1.body.updates[0].text).toBe("Most reacted");
+    expect(page1.body.pagination.page).toBe(1);
+    expect(page1.body.pagination.limit).toBe(1);
+    page1.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
+    expect(page1.body.pagination.hasNextPage).toBe(true);
+
+    // Page 2 should contain the second-most-reacted update,
+    // proving sorting happened before pagination.
+    const page2 = await request(app).get(
+      "/api/updates?sort=most-reactions&page=2&limit=1",
+    );
+
+    expect(page2.status).toBe(200);
+    expect(page2.body.updates).toHaveLength(1);
+    expect(page2.body.updates[0].text).toBe("Second most reacted");
+    expect(page2.body.pagination.page).toBe(2);
+    expect(page2.body.pagination.limit).toBe(1);
+    page2.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
+    expect(page2.body.pagination.hasNextPage).toBe(true);
+
+    // Page 3 should contain the update with no reactions.
+    const page3 = await request(app).get(
+      "/api/updates?sort=most-reactions&page=3&limit=1",
+    );
+
+    expect(page3.status).toBe(200);
+    expect(page3.body.updates).toHaveLength(1);
+    expect(page3.body.updates[0].text).toBe("No reactions");
+    page3.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
+    expect(page3.body.pagination.hasNextPage).toBe(false);
+  });
+  it("sorts by reactions before applying pagination", async () => {
+    const mostReacted = await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "Most reacted", status: "blocked" });
 
     await request(app)
       .post("/api/updates")
       .set("Authorization", `Bearer ${token}`)
-      .send({ text: "No reactions", status: "blocked" });
+      .send({ text: "Second update", status: "blocked" });
+
+    await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "Newest update", status: "blocked" });
+
+    const updateId = mostReacted.body.update._id;
 
     await request(app)
       .post(`/api/updates/${updateId}/reactions`)
       .set("Authorization", `Bearer ${token}`)
       .send({ emoji: "✅" });
 
-    const res = await request(app).get("/api/updates?sort=most-reactions");
+    await request(app)
+      .post(`/api/updates/${updateId}/reactions`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ emoji: "🔥" });
+    await request(app)
+      .post(`/api/updates/${updateId}/reactions`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ emoji: "🚀" });
+
+    const res = await request(app).get(
+      "/api/updates?sort=most-reactions&page=1&limit=1",
+    );
 
     expect(res.status).toBe(200);
-    expect(res.body.updates).toHaveLength(2);
+    expect(res.body.updates).toHaveLength(1);
     expect(res.body.updates[0].text).toBe("Most reacted");
-  });
+    expect(res.body.pagination.page).toBe(1);
+    expect(res.body.pagination.limit).toBe(1);
+    res.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
 
+  });
   it("rejects an invalid sort value", async () => {
     const res = await request(app).get("/api/updates?sort=popular");
 
@@ -228,10 +378,12 @@ describe("GET /api/updates", () => {
       .send({ text: "Done update", status: "done" });
 
     const res = await request(app).get("/api/updates?status=blocked");
-
     expect(res.status).toBe(200);
     expect(res.body.updates).toHaveLength(1);
     expect(res.body.updates[0].status).toBe("blocked");
+    res.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
   });
 
   it("filters by author", async () => {
@@ -255,6 +407,9 @@ describe("GET /api/updates", () => {
     expect(res.status).toBe(200);
     expect(res.body.updates).toHaveLength(1);
     expect(res.body.updates[0].text).toBe("Mine");
+    res.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
   });
 
   it("filters by tags", async () => {
@@ -273,6 +428,9 @@ describe("GET /api/updates", () => {
     expect(res.status).toBe(200);
     expect(res.body.updates).toHaveLength(1);
     expect(res.body.updates[0].tags[0]).toBe("frontend");
+    res.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
   });
 
   it("filters by q", async () => {
@@ -297,6 +455,9 @@ describe("GET /api/updates", () => {
     expect(res.body.updates).toHaveLength(2);
     expect(res.body.updates[0].text).toBe("Meeting with the client");
     expect(res.body.updates[1].text).toBe("Team meeting today");
+    res.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
   });
 
   it("returns an empty array when q matches no updates", async () => {
@@ -333,6 +494,75 @@ describe("GET /api/updates", () => {
     expect(res.body.updates).toHaveLength(1);
     expect(res.body.updates[0].text).toBe("Meeting with frontend team");
     expect(res.body.updates[0].status).toBe("blocked");
+    res.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
+  });
+
+  it("filters by q", async () => {
+    await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "Team meeting today", status: "on-track" });
+
+    await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "Fixed login bug", status: "done" });
+
+    await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "Meeting with the client", status: "blocked" });
+
+    const res = await request(app).get("/api/updates?q=MEETING");
+
+    expect(res.status).toBe(200);
+    expect(res.body.updates).toHaveLength(2);
+    expect(res.body.updates[0].text).toBe("Meeting with the client");
+    expect(res.body.updates[1].text).toBe("Team meeting today");
+    res.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
+  });
+
+  it("returns an empty array when q matches no updates", async () => {
+    await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "Team meeting today", status: "on-track" });
+
+    const res = await request(app).get("/api/updates?q=nonexistent");
+
+    expect(res.status).toBe(200);
+    expect(res.body.updates).toEqual([]);
+  });
+
+  it("combines q with status filter", async () => {
+    await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "Meeting with frontend team", status: "blocked" });
+
+    await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "Meeting with backend team", status: "done" });
+
+    await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "Fixed frontend bug", status: "blocked" });
+
+    const res = await request(app).get("/api/updates?q=meeting&status=blocked");
+
+    expect(res.status).toBe(200);
+    expect(res.body.updates).toHaveLength(1);
+    expect(res.body.updates[0].text).toBe("Meeting with frontend team");
+    expect(res.body.updates[0].status).toBe("blocked");
+    res.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
   });
 });
 
@@ -427,6 +657,9 @@ describe("update visibility", () => {
 
     expect(listRes.status).toBe(200);
     expect(listRes.body.updates).toHaveLength(2);
+    listRes.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
 
     const idRes = await request(app)
       .get(`/api/updates/${leadsRes.body.update._id}`)
@@ -455,6 +688,9 @@ describe("update visibility", () => {
     expect(res.status).toBe(200);
     expect(res.body.updates).toHaveLength(1);
     expect(res.body.updates[0].text).toBe("Legacy update");
+    res.body.updates.forEach((update) => {
+      expect(update).not.toHaveProperty("email");
+    })
   });
 
   it("returns 404 for a MEMBER adding a reaction to a leads-only update", async () => {
@@ -508,6 +744,23 @@ describe("update visibility", () => {
   });
 });
 
+describe("GET /api/updates/:id", () => {
+  it("returns 400 for a malformed update id", async () => {
+    const res = await request(app).get("/api/updates/not-an-object-id");
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Invalid update id");
+  });
+
+  it("returns 404 for a valid but nonexistent update id", async () => {
+    const missingUpdateId = new mongoose.Types.ObjectId().toString();
+    const res = await request(app).get(`/api/updates/${missingUpdateId}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Update not found");
+  });
+});
+
 describe("GET /api/updates/leaderboard", () => {
   it("returns authors sorted by update count with reaction totals", async () => {
     const other = await registerUser({
@@ -556,10 +809,12 @@ describe("GET /api/updates/leaderboard", () => {
     expect(res.body.leaderboard[0].author.displayName).toBe("Author");
     expect(res.body.leaderboard[0].updateCount).toBe(3);
     expect(res.body.leaderboard[0].reactionCount).toBe(0);
+    expect(res.body.leaderboard[0]).not.toHaveProperty("email");
 
     expect(res.body.leaderboard[1].author.displayName).toBe("Other");
     expect(res.body.leaderboard[1].updateCount).toBe(1);
     expect(res.body.leaderboard[1].reactionCount).toBe(2);
+    expect(res.body.leaderboard[1]).not.toHaveProperty("email");
   });
 
   it("returns an empty list when there are no updates in the requested window", async () => {
@@ -622,10 +877,30 @@ describe("GET /api/updates/leaderboard", () => {
 
     expect(res.body.leaderboard[0].updateCount).toBe(1);
     expect(res.body.leaderboard[0].author.displayName).toBe("Author");
+    expect(res.body.leaderboard[0]).not.toHaveProperty("email");
   });
 });
 
 describe("DELETE /api/updates/:id", () => {
+  it("returns 400 for a malformed update id", async () => {
+    const res = await request(app)
+      .delete("/api/updates/not-an-object-id")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Invalid update id");
+  });
+
+  it("returns 404 for a valid but nonexistent update id", async () => {
+    const missingUpdateId = new mongoose.Types.ObjectId().toString();
+    const res = await request(app)
+      .delete(`/api/updates/${missingUpdateId}`)
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Update not found");
+  });
+
   it("allows a LEAD to delete any update", async () => {
     // Promote the user directly via the model — the public /register
     // endpoint always creates a MEMBER. The original JWT was issued
@@ -697,6 +972,27 @@ describe("DELETE /api/updates/:id", () => {
 });
 
 describe("POST /api/updates/:id/reactions", () => {
+  it("returns 400 for a malformed update id", async () => {
+    const res = await request(app)
+      .post("/api/updates/not-an-object-id/reactions")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ emoji: "🎉" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Invalid update id");
+  });
+
+  it("returns 404 for a valid but nonexistent update id", async () => {
+    const missingUpdateId = new mongoose.Types.ObjectId().toString();
+    const res = await request(app)
+      .post(`/api/updates/${missingUpdateId}/reactions`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ emoji: "🎉" });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Update not found");
+  });
+
   it("adds a reaction to an update", async () => {
     const createRes = await request(app)
       .post("/api/updates")
@@ -713,6 +1009,7 @@ describe("POST /api/updates/:id/reactions", () => {
     expect(res.status).toBe(201);
     expect(res.body.update.reactions).toHaveLength(1);
     expect(res.body.update.reactions[0].emoji).toBe("🎉");
+    expect(res.body.update).not.toHaveProperty("email");
   });
 
   it("rejects duplicate reactions from the same user with the same emoji", async () => {
@@ -790,6 +1087,37 @@ describe("POST /api/updates/:id/reactions", () => {
 });
 
 describe("DELETE /api/updates/:id/reactions/:reactionId", () => {
+  it("returns 400 for a malformed update id", async () => {
+    const validReactionId = new mongoose.Types.ObjectId().toString();
+    const res = await request(app)
+      .delete(`/api/updates/not-an-object-id/reactions/${validReactionId}`)
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Invalid update or reaction id");
+  });
+
+  it("returns 400 for a malformed reaction id", async () => {
+    const validUpdateId = new mongoose.Types.ObjectId().toString();
+    const res = await request(app)
+      .delete(`/api/updates/${validUpdateId}/reactions/not-a-reaction-id`)
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Invalid update or reaction id");
+  });
+
+  it("returns 404 for a valid but nonexistent update id", async () => {
+    const missingUpdateId = new mongoose.Types.ObjectId().toString();
+    const validReactionId = new mongoose.Types.ObjectId().toString();
+    const res = await request(app)
+      .delete(`/api/updates/${missingUpdateId}/reactions/${validReactionId}`)
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Update not found");
+  });
+
   it("deletes a reaction and returns the updated update", async () => {
     const createRes = await request(app)
       .post("/api/updates")
@@ -881,6 +1209,27 @@ describe("DELETE /api/updates/:id/reactions/:reactionId", () => {
 });
 
 describe("PATCH /api/updates/:id", () => {
+  it("returns 400 for a malformed update id", async () => {
+    const res = await request(app)
+      .patch("/api/updates/not-an-object-id")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "Updated text" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Invalid update id");
+  });
+
+  it("returns 404 for a valid but nonexistent update id", async () => {
+    const missingUpdateId = new mongoose.Types.ObjectId().toString();
+    const res = await request(app)
+      .patch(`/api/updates/${missingUpdateId}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "Updated text" });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Update not found");
+  });
+
   it("rejects text longer than 1000 characters", async () => {
     const createRes = await request(app)
       .post("/api/updates")
@@ -922,6 +1271,7 @@ describe("PATCH /api/updates/:id", () => {
     expect(res.body.update.status).toBe("done");
     expect(res.body.update._id).toBe(updateId);
     expect(res.body.update.author._id).toBe(userId);
+    expect(res.body.update).not.toHaveProperty("email");
   });
 
   it("adds edited indicator when author edit their own update", async () => {
@@ -949,6 +1299,7 @@ describe("PATCH /api/updates/:id", () => {
     expect(res.body.update._id).toBe(updateId);
     expect(res.body.update.author._id).toBe(userId);
     expect(res.body.update.editedAt).toBeTruthy();
+    expect(res.body.update).not.toHaveProperty("email");
   });
 
   it("edited indicator is not added for updates that are not edited", async () => {
@@ -965,6 +1316,7 @@ describe("PATCH /api/updates/:id", () => {
     expect(res.body.update.status).toBe("on-track");
     expect(res.body.update.author._id).toBe(userId);
     expect(res.body.update.editedAt).toBeNull();
+    expect(res.body.update).not.toHaveProperty("email");
   });
 
   it("rejects another user from editing the update", async () => {
@@ -1146,6 +1498,7 @@ describe("PATCH /api/updates/:id", () => {
       expect(res.body).toHaveProperty("data");
       expect(Array.isArray(res.body.data)).toBe(true);
       expect(res.headers["content-type"]).toContain("application/json");
+      expect(res.body).not.toHaveProperty("email");
     });
 
     test("returns updates as CSV when format=csv", async () => {
@@ -1194,5 +1547,205 @@ describe("PATCH /api/updates/:id", () => {
       expect(firstUpdate).not.toHaveProperty("email");
       expect(firstUpdate).not.toHaveProperty("tags");
     });
+  });
+});
+
+describe("PATCH /api/updates/:id/pin", () => {
+  it("returns 400 for a malformed update id", async () => {
+    await User.findOneAndUpdate(
+      { email: "author@example.com" },
+      { role: "LEAD" },
+    );
+    const leadLogin = await request(app).post("/api/auth/login").send({
+      email: "author@example.com",
+      password: "password123",
+    });
+
+    const res = await request(app)
+      .patch("/api/updates/not-an-object-id/pin")
+      .set("Authorization", `Bearer ${leadLogin.body.token}`)
+      .send({ pinned: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Invalid update id");
+  });
+
+  it("returns 404 for a valid but nonexistent update id", async () => {
+    await User.findOneAndUpdate(
+      { email: "author@example.com" },
+      { role: "LEAD" },
+    );
+    const leadLogin = await request(app).post("/api/auth/login").send({
+      email: "author@example.com",
+      password: "password123",
+    });
+    const missingUpdateId = new mongoose.Types.ObjectId().toString();
+
+    const res = await request(app)
+      .patch(`/api/updates/${missingUpdateId}/pin`)
+      .set("Authorization", `Bearer ${leadLogin.body.token}`)
+      .send({ pinned: true });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Update not found");
+  });
+
+  it("returns 403 when a MEMBER tries to pin an update", async () => {
+    const createRes = await request(app)
+      .post("/api/updates")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "Protected update", status: "on-track" });
+
+    const updateId = createRes.body.update._id;
+
+    const member = await registerUser({
+      email: "member@example.com",
+      displayName: "Member",
+    });
+
+    const res = await request(app)
+      .patch(`/api/updates/${updateId}/pin`)
+      .set("Authorization", `Bearer ${member.token}`)
+      .send({
+        pinned: true,
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.message || res.body.error).toMatch(/Access Denied/i);
+  });
+
+  it("allowing lead pinning and unpinning an update", async () => {
+    await User.findOneAndUpdate(
+      { email: "author@example.com" },
+      { role: "LEAD" },
+    );
+
+    const LeadLoginRes = await request(app).post("/api/auth/login").send({
+      email: "author@example.com",
+      password: "password123",
+    });
+
+    const leadToken = LeadLoginRes.body.token;
+
+    const member = await registerUser({
+      email: "member@example.com",
+      displayName: "Member",
+    });
+
+    const memberCreateRes = await request(app)
+      .post("/api/updates/")
+      .set("Authorization", `Bearer ${member.token}`)
+      .send({ text: "Protected Update", status: "on-track" });
+
+    const updateId = memberCreateRes.body.update._id;
+
+    // Lead pinning an update
+    const resPin = await request(app)
+      .patch(`/api/updates/${updateId}/pin`)
+      .set("Authorization", `Bearer ${leadToken}`)
+      .send({
+        pinned: true,
+      });
+
+    expect(resPin.status).toBe(200);
+    expect(resPin.body.update._id).toBe(updateId);
+    expect(resPin.body.update.pinned).toBe(true);
+    expect(resPin.body.update.author._id).toBe(member.user._id);
+
+    // Lead unpinning an update
+    const resUnpin = await request(app)
+      .patch(`/api/updates/${updateId}/pin`)
+      .set("Authorization", `Bearer ${leadToken}`)
+      .send({
+        pinned: false,
+      });
+
+    expect(resUnpin.status).toBe(200);
+    expect(resUnpin.body.update._id).toBe(updateId);
+    expect(resUnpin.body.update.pinned).toBe(false);
+    expect(resUnpin.body.update.author._id).toBe(member.user._id);
+  });
+
+  it("tests the pinned update was always on the top", async () => {
+    await User.findOneAndUpdate(
+      { email: "author@example.com" },
+      { role: "LEAD" },
+    );
+
+    const LeadLoginRes = await request(app).post("/api/auth/login").send({
+      email: "author@example.com",
+      password: "password123",
+    });
+
+    const leadToken = LeadLoginRes.body.token;
+
+    const member = await registerUser({
+      email: "member@example.com",
+      displayName: "Member",
+    });
+
+    const memberCreateRes1 = await request(app)
+      .post("/api/updates/")
+      .set("Authorization", `Bearer ${member.token}`)
+      .send({ text: "First Update", status: "on-track" });
+
+    const firstUpdateId = memberCreateRes1.body.update._id;
+
+    const memberCreateRes2 = await request(app)
+      .post("/api/updates/")
+      .set("Authorization", `Bearer ${member.token}`)
+      .send({ text: "Second Update", status: "on-track" });
+
+    const secondUpdateId = memberCreateRes2.body.update._id;
+
+    const leadRes = await request(app)
+      .patch(`/api/updates/${firstUpdateId}/pin`)
+      .set("Authorization", `Bearer ${leadToken}`)
+      .send({
+        pinned: true,
+      });
+
+    expect(leadRes.status).toBe(200);
+
+    const res = await request(app).get("/api/updates");
+
+    expect(res.status).toBe(200);
+    expect(res.body.updates).toHaveLength(2);
+    expect(res.body.updates[0].text).toBe("First Update");
+    expect(res.body.updates[0]).not.toHaveProperty("email");
+  });
+
+  it("returns 404 when pinning an non-existing update", async () => {
+    await User.findOneAndUpdate(
+      { email: "author@example.com" },
+      { role: "LEAD" },
+    );
+
+    const loginRes = await request(app).post("/api/auth/login").send({
+      email: "author@example.com",
+      password: "password123",
+    });
+
+    const token = loginRes.body.token;
+
+    const createRes = await request(app)
+      .post("/api/updates/")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ text: "First Update", status: "on-track" });
+
+    const updateId = createRes.body.update._id;
+
+    const deleteRes = await request(app)
+      .delete(`/api/updates/${updateId}`)
+      .set("Authorization", `Bearer ${token}`);
+
+    const pinRes = await request(app)
+      .patch(`/api/updates/${updateId}/pin`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        pinned: true,
+      });
+
+    expect(pinRes.status).toBe(404);
   });
 });
