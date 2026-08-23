@@ -28,10 +28,10 @@ const reactionLimiter = rateLimit({
   legacyHeaders: false,
   message: {
     error:
-      "Too many reactions clicked. Please wait a minute before reacting again."
+      "Too many reactions clicked. Please wait a minute before reacting again.",
   },
-  keyGenerator: (req)=> req.user?.id,
-})
+  keyGenerator: (req) => req.user?.id,
+});
 
 // Legacy records predate the visibility field, so treat anything but an explicit "leads" as visible.
 function isVisibleToRequester(update, user) {
@@ -99,7 +99,6 @@ router.get("/", optionalAuth, async (req, res) => {
     return res.status(500).json({ error: "Failed to fetch updates" });
   }
 });
-
 
 // GET /api/updates/leaderboard?days=7
 router.get("/leaderboard", async (req, res) => {
@@ -170,7 +169,6 @@ router.get("/leaderboard", async (req, res) => {
   }
 });
 
-
 // GET /api/updates/export?start=<date>&end=<date>&format=csv|json
 // Exports updates within a date range as JSON or CSV
 router.get("/export", async (req, res) => {
@@ -214,11 +212,11 @@ router.get("/export", async (req, res) => {
 
     // Format the data for export
     const exportData = updates.map((update) => ({
-      author: update.author?.displayName || "Unknown",      
+      author: update.author?.displayName || "Unknown",
       text: update.text,
       status: update.status,
       createdAt: update.createdAt.toISOString(),
-      reactionCount: update.reactions?.length || 0,      
+      reactionCount: update.reactions?.length || 0,
     }));
 
     // Handle empty results
@@ -229,7 +227,7 @@ router.get("/export", async (req, res) => {
         data: [],
       });
     }
-        
+
     if (format.toLowerCase() === "csv") {
       return exportAsCSV(res, exportData);
     }
@@ -247,14 +245,8 @@ router.get("/export", async (req, res) => {
   }
 });
 
-function exportAsCSV(res, data) {  
-  const headers = [
-    "Author",    
-    "Text",
-    "Status",
-    "Created At",
-    "Reaction Count",    
-  ];
+function exportAsCSV(res, data) {
+  const headers = ["Author", "Text", "Status", "Created At", "Reaction Count"];
 
   // Escape quotes in text fields for CSV compatibility
   const escapeCSV = (str) => {
@@ -262,12 +254,12 @@ function exportAsCSV(res, data) {
     return `"${str.replace(/"/g, '""')}"`;
   };
 
-    const rows = data.map((row) => [
-    escapeCSV(row.author),    
+  const rows = data.map((row) => [
+    escapeCSV(row.author),
     escapeCSV(row.text),
     row.status,
     row.createdAt,
-    row.reactionCount,    
+    row.reactionCount,
   ]);
 
   const csvContent = [
@@ -278,11 +270,10 @@ function exportAsCSV(res, data) {
   res.setHeader("Content-Type", "text/csv");
   res.setHeader(
     "Content-Disposition",
-    `attachment; filename=updates_export_${Date.now()}.csv`
+    `attachment; filename=updates_export_${Date.now()}.csv`,
   );
   return res.send(csvContent);
 }
-
 
 // GET /api/updates/:id
 router.get("/:id", optionalAuth, async (req, res) => {
@@ -369,27 +360,35 @@ router.patch("/:id", requireAuth, async (req, res) => {
   }
 });
 
-router.delete("/:id", requireAuth, checkRole("LEAD", "MEMBER"), async (req, res) => {
-  try {
-    const update = await Update.findById(req.params.id);
+router.delete(
+  "/:id",
+  requireAuth,
+  checkRole("LEAD", "MEMBER"),
+  async (req, res) => {
+    try {
+      const update = await Update.findById(req.params.id);
 
-    if (!update) {
-      return res.status(404).json({ error: "Update not found" });
+      if (!update) {
+        return res.status(404).json({ error: "Update not found" });
+      }
+
+      if (
+        update.author.toString() !== req.user.id &&
+        req.user.role !== "LEAD"
+      ) {
+        return res.status(403).json({
+          error: "Access Denied",
+        });
+      }
+
+      await Update.findByIdAndDelete(req.params.id);
+
+      return res.status(200).json(req.params.id);
+    } catch (err) {
+      return res.status(400).json({ error: "Invalid update id" });
     }
-
-    if (update.author.toString() !== req.user.id && req.user.role !== "LEAD") {
-      return res.status(403).json({
-        error: "Access Denied",
-      });
-    }
-
-    await Update.findByIdAndDelete(req.params.id);
-
-    return res.status(200).json(req.params.id);
-  } catch (err) {
-    return res.status(400).json({ error: "Invalid update id" });
-  }
-});
+  },
+);
 
 // POST /api/updates
 router.post(
